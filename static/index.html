@@ -41,7 +41,7 @@
   #updated { font-size: 12px; color: var(--ink-muted); margin-left: auto; }
   #legend { display: flex; gap: 14px; flex-wrap: wrap; }
   .lg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
-  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
   .dot.stale { background: transparent; border: 2px dashed var(--ink-muted); }
   .lg .count { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
   #banner {
@@ -49,7 +49,44 @@
     background: #3a1414; color: #f1b8b8; border-bottom: 1px solid var(--status-critical);
   }
   main { flex: 1; display: flex; min-height: 0; }
-  #graph { flex: 1; background: var(--page); }
+
+  /* tree sidebar */
+  #tree {
+    width: 240px; flex: none; overflow-y: auto;
+    border-right: 1px solid var(--hairline); background: var(--surface);
+    padding: 8px 0; font-size: 12.5px;
+  }
+  #tree .troot {
+    padding: 4px 12px; color: var(--ink-muted);
+    text-transform: uppercase; font-size: 11px; letter-spacing: 0.6px;
+  }
+  #tree .titem {
+    display: flex; align-items: center; gap: 7px;
+    padding: 3px 12px; cursor: pointer; color: var(--ink-2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #tree .titem:hover { background: var(--surface-raised); }
+  #tree .titem.sel { background: var(--surface-raised); color: var(--ink); }
+  #tree .tnode { font-weight: 600; color: var(--ink); margin-top: 6px; }
+  #tree .tpod { padding-left: 30px; }
+  #tree .tpod .dot { width: 8px; height: 8px; }
+  #tree .count { color: var(--ink-muted); font-weight: 400; }
+
+  /* map area */
+  #graphwrap { flex: 1; position: relative; min-width: 0; }
+  #graph { position: absolute; inset: 0; }
+  #crumb {
+    position: absolute; top: 10px; left: 12px; z-index: 5;
+    font-size: 12px; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--baseline);
+    border-radius: 6px; padding: 4px 10px; user-select: none;
+  }
+  #crumb a { color: var(--ink-2); cursor: pointer; text-decoration: none; }
+  #crumb a:hover { color: var(--ink); text-decoration: underline; }
+  #crumb .here { color: var(--ink); font-weight: 600; }
+  #crumb .hint { color: var(--ink-muted); margin-left: 8px; }
+
+  /* detail panel */
   #panel {
     width: 280px; display: none; flex-direction: column; gap: 10px;
     border-left: 1px solid var(--hairline); background: var(--surface);
@@ -69,6 +106,20 @@
     background: none; border: 1px solid var(--baseline); border-radius: 6px;
     padding: 3px 10px; cursor: pointer;
   }
+
+  /* event ticker */
+  #ticker {
+    height: 138px; flex: none; overflow-y: auto;
+    border-top: 1px solid var(--hairline); background: var(--surface);
+    padding: 6px 0; font-size: 12px;
+  }
+  #ticker .ev {
+    display: flex; align-items: center; gap: 10px;
+    padding: 2px 16px; color: var(--ink-2);
+  }
+  #ticker .ev .t { color: var(--ink-muted); font-variant-numeric: tabular-nums; flex: none; }
+  #ticker .ev .dot { width: 8px; height: 8px; }
+  #ticker .ev .msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -81,9 +132,14 @@
 </header>
 <div id="banner"></div>
 <main>
-  <div id="graph"></div>
+  <aside id="tree"></aside>
+  <div id="graphwrap">
+    <div id="crumb"></div>
+    <div id="graph"></div>
+  </div>
   <aside id="panel"></aside>
 </main>
+<footer id="ticker"></footer>
 
 <script>
 "use strict";
@@ -106,7 +162,16 @@ function podStatus(p) {
   return STATUS[p.phase] ? p.phase : "Stale";
 }
 
-const truncate = s => (s.length > 26 ? s.slice(0, 25) + "…" : s);
+const truncate = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function age(iso) {
+  if (!iso) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s >= 86400) return Math.floor(s / 86400) + "d";
+  if (s >= 3600) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 60) + "m";
+}
 
 const nodesDS = new vis.DataSet([]);
 const edgesDS = new vis.DataSet([]);
@@ -114,29 +179,32 @@ const network = new vis.Network(
   document.getElementById("graph"),
   { nodes: nodesDS, edges: edgesDS },
   {
-    physics: {
-      barnesHut: { gravitationalConstant: -3500, springLength: 95, springConstant: 0.05, damping: 0.3 },
-      stabilization: { iterations: 200 },
-    },
-    interaction: { hover: true },
-    nodes: { borderWidth: 2 },
+    physics: false,                       // SNMPc rule: the map is a place — nothing moves on its own
+    interaction: { hover: true, dragNodes: false },
+    nodes: { borderWidth: 2, fixed: { x: true, y: true } },
     edges: { color: { color: C("--baseline") }, width: 1, selectionWidth: 0 },
   }
 );
 
-let byId = {};   // vertex id -> source object, for the detail panel
+let byId = {};
 let lastHash = "";
 let lastFetched = null;
+let lastSnap = null;
+let view = { mode: "cluster", node: null }; // or { mode: "node", node: "<name>" }
+let viewChanged = true;
+let errorLogged = false;
 
-function vertexForNode(n) {
+/* ---------- deterministic layout ---------- */
+
+function vertexForNode(n, pos, big) {
   const notReady = !n.ready;
   const roles = n.roles && n.roles.length ? n.roles.join(",") : "worker";
   return {
     id: "node:" + n.name,
     label: n.name + "\n" + roles + (notReady ? "  ·  NOT READY" : ""),
-    shape: "box",
-    margin: 10,
-    font: { color: C("--ink"), size: 12, multi: false },
+    shape: "box", margin: big ? 14 : 10,
+    x: pos.x, y: pos.y,
+    font: { color: C("--ink"), size: big ? 14 : 12, multi: false },
     color: {
       background: C("--surface-raised"),
       border: notReady ? C("--status-critical") : C("--status-good"),
@@ -145,14 +213,14 @@ function vertexForNode(n) {
   };
 }
 
-function vertexForPod(p) {
+function vertexForPod(p, pos, big) {
   const st = STATUS[podStatus(p)];
   return {
     id: "pod:" + p.namespace + "/" + p.name,
-    label: truncate(p.name) + (p.restarts > 0 ? "  ↺" + p.restarts : ""),
-    shape: "dot",
-    size: 9,
-    font: { color: C("--ink-2"), size: 10 },
+    label: truncate(p.name, big ? 40 : 22) + (p.restarts > 0 ? "  ↺" + p.restarts : ""),
+    shape: "dot", size: big ? 11 : 8,
+    x: pos.x, y: pos.y,
+    font: { color: C("--ink-2"), size: big ? 12 : 10 },
     color: {
       background: st.dashed ? C("--surface") : st.color,
       border: st.color,
@@ -162,34 +230,70 @@ function vertexForPod(p) {
   };
 }
 
-function render(snap) {
-  byId = {};
+// Cluster view: node boxes on a fixed grid, each node's pods in a small grid
+// beneath it. Node submap: one node, its pods writ large. Positions are pure
+// functions of sorted order — the same cluster always draws the same map.
+function layout(snap) {
   const vertices = [], edges = [];
-
-  for (const n of snap.nodes) {
-    const v = vertexForNode(n);
-    byId[v.id] = { kind: "node", data: n };
-    vertices.push(v);
+  byId = {};
+  const anchors = [...snap.nodes.map(n => ({ kind: "node", data: n }))];
+  if (snap.pods.some(p => !p.node)) {
+    anchors.push({ kind: "pseudo", data: { name: "", label: "unscheduled" } });
   }
-  const unscheduled = snap.pods.filter(p => !p.node).length;
-  if (unscheduled > 0) {
-    vertices.push({
-      id: "node:", label: "unscheduled", shape: "box", margin: 10,
-      font: { color: C("--ink-muted"), size: 12 },
-      color: { background: C("--surface"), border: C("--ink-muted") },
-      shapeProperties: { borderDashes: [4, 4] },
+
+  if (view.mode === "node") {
+    const n = snap.nodes.find(x => x.name === view.node);
+    if (!n) { view = { mode: "cluster", node: null }; return layout(snap); }
+    vertices.push(vertexForNode(n, { x: 0, y: -190 }, true));
+    byId["node:" + n.name] = { kind: "node", data: n };
+    const pods = snap.pods.filter(p => p.node === n.name);
+    pods.forEach((p, i) => {
+      const col = i % 4, row = Math.floor(i / 4);
+      const v = vertexForPod(p, { x: (col - 1.5) * 190, y: row * 95 + 20 }, true);
+      byId[v.id] = { kind: "pod", data: p };
+      vertices.push(v);
+      edges.push({ id: "e:" + v.id, from: "node:" + n.name, to: v.id });
     });
-    byId["node:"] = { kind: "node", data: { name: "(unscheduled)", ready: null, roles: [] } };
-  }
-  for (const p of snap.pods) {
-    const v = vertexForPod(p);
-    byId[v.id] = { kind: "pod", data: p };
-    vertices.push(v);
-    edges.push({ id: "e:" + v.id, from: "node:" + p.node, to: v.id });
+    return { vertices, edges };
   }
 
-  // Diff into the DataSets: update() moves only what changed, so the layout
-  // stays put across polls instead of re-exploding every 10 seconds.
+  anchors.forEach((a, i) => {
+    const acol = i % 4, arow = Math.floor(i / 4);
+    const ax = acol * 360, ay = arow * 460;
+    let anchorId;
+    if (a.kind === "node") {
+      const v = vertexForNode(a.data, { x: ax, y: ay });
+      anchorId = v.id;
+      byId[v.id] = { kind: "node", data: a.data };
+      vertices.push(v);
+    } else {
+      anchorId = "node:";
+      vertices.push({
+        id: anchorId, label: "unscheduled", shape: "box", margin: 10,
+        x: ax, y: ay,
+        font: { color: C("--ink-muted"), size: 12 },
+        color: { background: C("--surface"), border: C("--ink-muted") },
+        shapeProperties: { borderDashes: [4, 4] },
+      });
+      byId[anchorId] = { kind: "node", data: { name: "(unscheduled)", ready: null, roles: [] } };
+    }
+    const pods = snap.pods.filter(p => "node:" + p.node === anchorId);
+    pods.forEach((p, j) => {
+      const col = j % 3, row = Math.floor(j / 3);
+      const v = vertexForPod(p, { x: ax + (col - 1) * 112, y: ay + 120 + row * 64 });
+      byId[v.id] = { kind: "pod", data: p };
+      vertices.push(v);
+      edges.push({ id: "e:" + v.id, from: anchorId, to: v.id });
+    });
+  });
+  return { vertices, edges };
+}
+
+/* ---------- render ---------- */
+
+function render(snap) {
+  const { vertices, edges } = layout(snap);
+
   const keep = new Set(vertices.map(v => v.id));
   nodesDS.remove(nodesDS.getIds().filter(id => !keep.has(id)));
   nodesDS.update(vertices);
@@ -197,7 +301,11 @@ function render(snap) {
   edgesDS.remove(edgesDS.getIds().filter(id => !keepE.has(id)));
   edgesDS.update(edges);
 
-  // Header chrome
+  if (viewChanged) {
+    network.fit({ animation: false });
+    viewChanged = false;
+  }
+
   document.getElementById("ctx").textContent = "context: " + snap.context;
   document.getElementById("counts").textContent =
     snap.nodes.length + " nodes · " + snap.pods.length + " pods";
@@ -212,17 +320,108 @@ function render(snap) {
              ' <span class="count">' + (tally[key] || 0) + "</span></span>";
     })
     .join("");
+
+  renderTree(snap);
+  renderCrumb();
 }
 
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
-function age(iso) {
-  if (!iso) return "—";
-  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s >= 86400) return Math.floor(s / 86400) + "d";
-  if (s >= 3600) return Math.floor(s / 3600) + "h";
-  return Math.floor(s / 60) + "m";
+function renderTree(snap) {
+  const tree = document.getElementById("tree");
+  let html = '<div class="troot">context: ' + esc(snap.context) + "</div>";
+  for (const n of snap.nodes) {
+    const pods = snap.pods.filter(p => p.node === n.name);
+    const dot = '<span class="dot" style="background:' +
+      (n.ready ? C("--status-good") : C("--status-critical")) + '"></span>';
+    html += '<div class="titem tnode" data-id="node:' + esc(n.name) + '">' + dot +
+      esc(n.name) + ' <span class="count">(' + pods.length + ")</span></div>";
+    for (const p of pods) {
+      const st = STATUS[podStatus(p)];
+      const pdot = st.dashed
+        ? '<span class="dot stale"></span>'
+        : '<span class="dot" style="background:' + st.color + '"></span>';
+      html += '<div class="titem tpod" data-id="pod:' + esc(p.namespace) + "/" + esc(p.name) + '">' +
+        pdot + esc(p.name) + "</div>";
+    }
+  }
+  const unsched = snap.pods.filter(p => !p.node);
+  if (unsched.length) {
+    html += '<div class="titem tnode" data-id="node:"><span class="dot stale"></span>unscheduled <span class="count">(' + unsched.length + ")</span></div>";
+    for (const p of unsched) {
+      html += '<div class="titem tpod" data-id="pod:' + esc(p.namespace) + "/" + esc(p.name) + '">' +
+        '<span class="dot" style="background:' + STATUS[podStatus(p)].color + '"></span>' + esc(p.name) + "</div>";
+    }
+  }
+  tree.innerHTML = html;
 }
+
+function renderCrumb() {
+  const crumb = document.getElementById("crumb");
+  if (view.mode === "node") {
+    crumb.innerHTML = '<a id="crumb-up">cluster</a> ▸ <span class="here">' +
+      esc(view.node) + '</span><span class="hint">double-click background to go up</span>';
+    document.getElementById("crumb-up").onclick = () => setView({ mode: "cluster", node: null });
+  } else {
+    crumb.innerHTML = '<span class="here">cluster</span><span class="hint">double-click a node to drill in</span>';
+  }
+}
+
+function setView(v) {
+  view = v;
+  viewChanged = true;
+  document.getElementById("panel").classList.remove("open");
+  if (lastSnap) render(lastSnap);
+}
+
+/* ---------- event ticker ---------- */
+
+function logEvent(sevKey, msg) {
+  const st = STATUS[sevKey] || { color: C("--ink-muted") };
+  const t = new Date().toTimeString().slice(0, 8);
+  const dot = st.dashed
+    ? '<span class="dot stale"></span>'
+    : '<span class="dot" style="background:' + st.color + '"></span>';
+  const row = document.createElement("div");
+  row.className = "ev";
+  row.innerHTML = '<span class="t">' + t + "</span>" + dot + '<span class="msg">' + esc(msg) + "</span>";
+  const ticker = document.getElementById("ticker");
+  ticker.prepend(row);
+  while (ticker.children.length > 200) ticker.lastChild.remove();
+}
+
+function diffIntoTicker(prev, next) {
+  if (!prev) {
+    logEvent("Running", "topology loaded: " + next.nodes.length + " nodes, " + next.pods.length + " pods");
+    return;
+  }
+  const prevNodes = new Map(prev.nodes.map(n => [n.name, n.ready]));
+  for (const n of next.nodes) {
+    if (!prevNodes.has(n.name)) logEvent(n.ready ? "Running" : "Failed", "node " + n.name + " appeared");
+    else if (prevNodes.get(n.name) !== n.ready) {
+      logEvent(n.ready ? "Running" : "Failed", "node " + n.name + ": " + (n.ready ? "NotReady → Ready" : "Ready → NOT READY"));
+    }
+    prevNodes.delete(n.name);
+  }
+  for (const [name] of prevNodes) logEvent("Succeeded", "node " + name + " removed");
+
+  const key = p => p.namespace + "/" + p.name;
+  const prevPods = new Map(prev.pods.map(p => [key(p), p]));
+  for (const p of next.pods) {
+    const old = prevPods.get(key(p));
+    const st = podStatus(p);
+    if (!old) logEvent(st, "pod " + key(p) + " appeared (" + st + ")");
+    else {
+      const oldSt = podStatus(old);
+      if (oldSt !== st) logEvent(st, "pod " + key(p) + ": " + oldSt + " → " + st);
+      if (p.restarts > old.restarts) {
+        logEvent("Failed", "pod " + key(p) + " restarted (↺" + p.restarts + ")");
+      }
+    }
+    prevPods.delete(key(p));
+  }
+  for (const [k] of prevPods) logEvent("Succeeded", "pod " + k + " removed");
+}
+
+/* ---------- detail panel ---------- */
 
 function showPanel(id) {
   const panel = document.getElementById("panel");
@@ -277,8 +476,37 @@ function showPanel(id) {
   panel.classList.add("open");
 }
 
+/* ---------- interaction wiring ---------- */
+
 network.on("selectNode", params => showPanel(params.nodes[0]));
 network.on("deselectNode", () => document.getElementById("panel").classList.remove("open"));
+
+network.on("doubleClick", params => {
+  const id = params.nodes[0];
+  if (view.mode === "cluster" && id && id.startsWith("node:") && id !== "node:") {
+    setView({ mode: "node", node: id.slice(5) });
+  } else if (view.mode === "node" && !id) {
+    setView({ mode: "cluster", node: null });
+  }
+});
+
+document.getElementById("tree").addEventListener("click", e => {
+  const item = e.target.closest(".titem");
+  if (!item) return;
+  const id = item.dataset.id;
+  if (!byId[id]) {
+    // item lives outside the current submap — jump back to cluster view first
+    setView({ mode: "cluster", node: null });
+  }
+  if (!byId[id]) return;
+  document.querySelectorAll("#tree .titem.sel").forEach(el => el.classList.remove("sel"));
+  item.classList.add("sel");
+  network.selectNodes([id]);
+  network.focus(id, { scale: 1.1, animation: { duration: 250 } });
+  showPanel(id);
+});
+
+/* ---------- polling ---------- */
 
 async function poll() {
   try {
@@ -288,14 +516,23 @@ async function poll() {
     const hash = JSON.stringify([snap.nodes, snap.pods]);
     if (hash !== lastHash) {
       lastHash = hash;
+      diffIntoTicker(lastSnap, snap);
+      lastSnap = snap;
       render(snap);
+    } else {
+      lastSnap = snap;
     }
     lastFetched = new Date(snap.fetchedAt);
     document.getElementById("banner").style.display = "none";
+    errorLogged = false;
   } catch (err) {
     const banner = document.getElementById("banner");
     banner.textContent = "cluster unreachable: " + err.message + " — retrying; map may be out of date";
     banner.style.display = "block";
+    if (!errorLogged) {
+      logEvent("Failed", "poll failed: " + err.message);
+      errorLogged = true;
+    }
   }
 }
 
