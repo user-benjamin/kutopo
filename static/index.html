@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kutopo</title>
+<script src="vis-network.min.js"></script>
+<style>
+  :root {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-raised: #232322;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --ink-muted: #898781;
+    --hairline: #2c2c2a;
+    --baseline: #383835;
+    --ring: rgba(255,255,255,0.10);
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #d03b3b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--hairline);
+    background: var(--surface);
+  }
+  header h1 { font-size: 16px; font-weight: 650; letter-spacing: 0.2px; }
+  .chip {
+    font-size: 12px; color: var(--ink-2);
+    border: 1px solid var(--baseline); border-radius: 999px; padding: 2px 10px;
+  }
+  #updated { font-size: 12px; color: var(--ink-muted); margin-left: auto; }
+  #legend { display: flex; gap: 14px; flex-wrap: wrap; }
+  .lg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.stale { background: transparent; border: 2px dashed var(--ink-muted); }
+  .lg .count { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+  #banner {
+    display: none; padding: 8px 16px; font-size: 13px;
+    background: #3a1414; color: #f1b8b8; border-bottom: 1px solid var(--status-critical);
+  }
+  main { flex: 1; display: flex; min-height: 0; }
+  #graph { flex: 1; background: var(--page); }
+  #panel {
+    width: 280px; display: none; flex-direction: column; gap: 10px;
+    border-left: 1px solid var(--hairline); background: var(--surface);
+    padding: 16px; overflow-y: auto;
+  }
+  #panel.open { display: flex; }
+  #panel h2 { font-size: 13px; font-weight: 650; word-break: break-all; }
+  #panel .kv { font-size: 12.5px; color: var(--ink-2); display: grid; grid-template-columns: 88px 1fr; gap: 3px 8px; }
+  #panel .kv dt { color: var(--ink-muted); }
+  #panel .kv dd { word-break: break-all; }
+  #panel .note {
+    font-size: 12px; color: var(--ink-2); padding: 8px 10px; border-radius: 6px;
+    border: 1px dashed var(--ink-muted); background: var(--surface-raised);
+  }
+  #panel button {
+    align-self: flex-start; font-size: 12px; color: var(--ink-2);
+    background: none; border: 1px solid var(--baseline); border-radius: 6px;
+    padding: 3px 10px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>kutopo</h1>
+  <span class="chip" id="ctx">context: …</span>
+  <span class="chip" id="counts">…</span>
+  <div id="legend"></div>
+  <span id="updated">connecting…</span>
+</header>
+<div id="banner"></div>
+<main>
+  <div id="graph"></div>
+  <aside id="panel"></aside>
+</main>
+
+<script>
+"use strict";
+
+const S = getComputedStyle(document.documentElement);
+const C = name => S.getPropertyValue(name).trim();
+const STATUS = {
+  Running:     { color: C("--status-good"),     label: "Running" },
+  Pending:     { color: C("--status-warning"),  label: "Pending" },
+  Terminating: { color: C("--status-serious"),  label: "Terminating" },
+  Failed:      { color: C("--status-critical"), label: "Failed" },
+  Succeeded:   { color: C("--ink-muted"),       label: "Succeeded" },
+  Stale:       { color: C("--ink-muted"),       label: "Stale (node not reporting)", dashed: true },
+};
+
+// Status precedence: an untrustworthy report beats the report itself.
+function podStatus(p) {
+  if (p.stale) return "Stale";
+  if (p.terminating) return "Terminating";
+  return STATUS[p.phase] ? p.phase : "Stale";
+}
+
+const truncate = s => (s.length > 26 ? s.slice(0, 25) + "…" : s);
+
+const nodesDS = new vis.DataSet([]);
+const edgesDS = new vis.DataSet([]);
+const network = new vis.Network(
+  document.getElementById("graph"),
+  { nodes: nodesDS, edges: edgesDS },
+  {
+    physics: {
+      barnesHut: { gravitationalConstant: -3500, springLength: 95, springConstant: 0.05, damping: 0.3 },
+      stabilization: { iterations: 200 },
+    },
+    interaction: { hover: true },
+    nodes: { borderWidth: 2 },
+    edges: { color: { color: C("--baseline") }, width: 1, selectionWidth: 0 },
+  }
+);
+
+let byId = {};   // vertex id -> source object, for the detail panel
+let lastHash = "";
+let lastFetched = null;
+
+function vertexForNode(n) {
+  const notReady = !n.ready;
+  const roles = n.roles && n.roles.length ? n.roles.join(",") : "worker";
+  return {
+    id: "node:" + n.name,
+    label: n.name + "\n" + roles + (notReady ? "  ·  NOT READY" : ""),
+    shape: "box",
+    margin: 10,
+    font: { color: C("--ink"), size: 12, multi: false },
+    color: {
+      background: C("--surface-raised"),
+      border: notReady ? C("--status-critical") : C("--status-good"),
+      highlight: { background: C("--surface-raised"), border: C("--ink-2") },
+    },
+  };
+}
+
+function vertexForPod(p) {
+  const st = STATUS[podStatus(p)];
+  return {
+    id: "pod:" + p.namespace + "/" + p.name,
+    label: truncate(p.name) + (p.restarts > 0 ? "  ↺" + p.restarts : ""),
+    shape: "dot",
+    size: 9,
+    font: { color: C("--ink-2"), size: 10 },
+    color: {
+      background: st.dashed ? C("--surface") : st.color,
+      border: st.color,
+      highlight: { background: st.color, border: C("--ink") },
+    },
+    shapeProperties: st.dashed ? { borderDashes: [4, 4] } : { borderDashes: false },
+  };
+}
+
+function render(snap) {
+  byId = {};
+  const vertices = [], edges = [];
+
+  for (const n of snap.nodes) {
+    const v = vertexForNode(n);
+    byId[v.id] = { kind: "node", data: n };
+    vertices.push(v);
+  }
+  const unscheduled = snap.pods.filter(p => !p.node).length;
+  if (unscheduled > 0) {
+    vertices.push({
+      id: "node:", label: "unscheduled", shape: "box", margin: 10,
+      font: { color: C("--ink-muted"), size: 12 },
+      color: { background: C("--surface"), border: C("--ink-muted") },
+      shapeProperties: { borderDashes: [4, 4] },
+    });
+    byId["node:"] = { kind: "node", data: { name: "(unscheduled)", ready: null, roles: [] } };
+  }
+  for (const p of snap.pods) {
+    const v = vertexForPod(p);
+    byId[v.id] = { kind: "pod", data: p };
+    vertices.push(v);
+    edges.push({ id: "e:" + v.id, from: "node:" + p.node, to: v.id });
+  }
+
+  // Diff into the DataSets: update() moves only what changed, so the layout
+  // stays put across polls instead of re-exploding every 10 seconds.
+  const keep = new Set(vertices.map(v => v.id));
+  nodesDS.remove(nodesDS.getIds().filter(id => !keep.has(id)));
+  nodesDS.update(vertices);
+  const keepE = new Set(edges.map(e => e.id));
+  edgesDS.remove(edgesDS.getIds().filter(id => !keepE.has(id)));
+  edgesDS.update(edges);
+
+  // Header chrome
+  document.getElementById("ctx").textContent = "context: " + snap.context;
+  document.getElementById("counts").textContent =
+    snap.nodes.length + " nodes · " + snap.pods.length + " pods";
+  const tally = {};
+  for (const p of snap.pods) tally[podStatus(p)] = (tally[podStatus(p)] || 0) + 1;
+  document.getElementById("legend").innerHTML = Object.entries(STATUS)
+    .map(([key, st]) => {
+      const dot = st.dashed
+        ? '<span class="dot stale"></span>'
+        : '<span class="dot" style="background:' + st.color + '"></span>';
+      return '<span class="lg">' + dot + st.label +
+             ' <span class="count">' + (tally[key] || 0) + "</span></span>";
+    })
+    .join("");
+}
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function age(iso) {
+  if (!iso) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s >= 86400) return Math.floor(s / 86400) + "d";
+  if (s >= 3600) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 60) + "m";
+}
+
+function showPanel(id) {
+  const panel = document.getElementById("panel");
+  const entry = byId[id];
+  if (!entry) { panel.classList.remove("open"); return; }
+  const d = entry.data;
+  let html = "";
+  if (entry.kind === "pod") {
+    const st = podStatus(d);
+    html =
+      "<h2>" + esc(d.name) + "</h2>" +
+      '<dl class="kv">' +
+      "<dt>namespace</dt><dd>" + esc(d.namespace) + "</dd>" +
+      "<dt>node</dt><dd>" + esc(d.node || "(unscheduled)") + "</dd>" +
+      "<dt>phase</dt><dd>" + esc(d.phase) + "</dd>" +
+      "<dt>status</dt><dd>" + esc(STATUS[st].label) + "</dd>" +
+      "<dt>ready</dt><dd>" + d.readyContainers + "/" + d.totalContainers + "</dd>" +
+      "<dt>restarts</dt><dd>" + d.restarts + "</dd>" +
+      "<dt>age</dt><dd>" + age(d.createdAt) + "</dd>" +
+      "<dt>owner</dt><dd>" + esc(d.owner || "—") + "</dd>" +
+      "<dt>images</dt><dd>" + (d.images || []).map(esc).join("<br>") + "</dd>" +
+      "</dl>";
+    if (d.stale) {
+      html += '<div class="note">This pod’s node has stopped reporting. ' +
+        "Phase is the kubelet’s last report and may not reflect reality.</div>";
+    }
+    if (d.terminating) {
+      html += '<div class="note">Deletion requested — waiting for the kubelet to carry it out.</div>';
+    }
+  } else {
+    const podCount = Object.values(byId)
+      .filter(e => e.kind === "pod" && e.data.node === d.name).length;
+    html =
+      "<h2>" + esc(d.name) + "</h2>" +
+      '<dl class="kv">' +
+      "<dt>ready</dt><dd>" + (d.ready === null ? "—" : d.ready ? "yes" : "NO") + "</dd>" +
+      "<dt>roles</dt><dd>" + esc((d.roles || []).join(", ") || "worker") + "</dd>" +
+      "<dt>pods</dt><dd>" + podCount + "</dd>";
+    if (d.version) {
+      html +=
+        "<dt>kubelet</dt><dd>" + esc(d.version) + "</dd>" +
+        "<dt>internal IP</dt><dd>" + esc(d.internalIP) + "</dd>" +
+        "<dt>allocatable</dt><dd>" + esc(d.cpu) + " CPU · " + esc(d.memory) + "</dd>" +
+        "<dt>age</dt><dd>" + age(d.createdAt) + "</dd>";
+    }
+    html += "</dl>";
+    if (d.pressures && d.pressures.length) {
+      html += '<div class="note">Node reports pressure: ' + d.pressures.map(esc).join(", ") + "</div>";
+    }
+  }
+  panel.innerHTML = html + "<button onclick=\"document.getElementById('panel').classList.remove('open')\">close</button>";
+  panel.classList.add("open");
+}
+
+network.on("selectNode", params => showPanel(params.nodes[0]));
+network.on("deselectNode", () => document.getElementById("panel").classList.remove("open"));
+
+async function poll() {
+  try {
+    const res = await fetch("/api/topology");
+    if (!res.ok) throw new Error(await res.text());
+    const snap = await res.json();
+    const hash = JSON.stringify([snap.nodes, snap.pods]);
+    if (hash !== lastHash) {
+      lastHash = hash;
+      render(snap);
+    }
+    lastFetched = new Date(snap.fetchedAt);
+    document.getElementById("banner").style.display = "none";
+  } catch (err) {
+    const banner = document.getElementById("banner");
+    banner.textContent = "cluster unreachable: " + err.message + " — retrying; map may be out of date";
+    banner.style.display = "block";
+  }
+}
+
+setInterval(() => {
+  if (!lastFetched) return;
+  const secs = Math.max(0, Math.round((Date.now() - lastFetched.getTime()) / 1000));
+  document.getElementById("updated").textContent = "updated " + secs + "s ago";
+}, 1000);
+
+poll();
+setInterval(poll, 10000);
+</script>
+</body>
+</html>

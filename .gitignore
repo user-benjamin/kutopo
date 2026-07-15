@@ -1,0 +1,4 @@
+# compiled binary (build with: go build -o kutopo .)
+/kutopo
+
+.DS_Store
