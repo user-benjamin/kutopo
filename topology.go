@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 )
 
 type NodeInfo struct {
@@ -40,26 +37,21 @@ type PodInfo struct {
 }
 
 type Snapshot struct {
-	Context   string     `json:"context"`
-	FetchedAt time.Time  `json:"fetchedAt"`
-	Nodes     []NodeInfo `json:"nodes"`
-	Pods      []PodInfo  `json:"pods"`
+	Context    string     `json:"context"`
+	FetchedAt  time.Time  `json:"fetchedAt"`
+	StaleSince *time.Time `json:"staleSince,omitempty"`
+	Nodes      []NodeInfo `json:"nodes"`
+	Pods       []PodInfo  `json:"pods"`
 }
 
-func buildSnapshot(ctx context.Context, client kubernetes.Interface, kubeContext string) (*Snapshot, error) {
-	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	pods, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
+// assembleSnapshot is pure: cluster objects in, normalized topology out.
+// It performs no I/O, which is what makes the truthfulness rules below
+// testable without a cluster.
+func assembleSnapshot(kubeContext string, nodes []*corev1.Node, pods []*corev1.Pod, staleSince *time.Time) *Snapshot {
+	snap := &Snapshot{Context: kubeContext, FetchedAt: time.Now(), StaleSince: staleSince}
 
-	snap := &Snapshot{Context: kubeContext, FetchedAt: time.Now()}
-
-	nodeReady := make(map[string]bool, len(nodes.Items))
-	for _, n := range nodes.Items {
+	nodeReady := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
 		ready := false
 		var pressures []string
 		for _, cond := range n.Status.Conditions {
@@ -82,7 +74,7 @@ func buildSnapshot(ctx context.Context, client kubernetes.Interface, kubeContext
 		snap.Nodes = append(snap.Nodes, NodeInfo{
 			Name:       n.Name,
 			Ready:      ready,
-			Roles:      nodeRoles(&n),
+			Roles:      nodeRoles(n),
 			Version:    n.Status.NodeInfo.KubeletVersion,
 			InternalIP: internalIP,
 			CPU:        n.Status.Allocatable.Cpu().String(),
@@ -92,7 +84,7 @@ func buildSnapshot(ctx context.Context, client kubernetes.Interface, kubeContext
 		})
 	}
 
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		ready, onKnownNode := nodeReady[p.Spec.NodeName]
 		var restarts int32
 		readyContainers := 0
@@ -125,7 +117,7 @@ func buildSnapshot(ctx context.Context, client kubernetes.Interface, kubeContext
 			// Phase is the kubelet's last report. If the pod's node has stopped
 			// reporting (NotReady), that phase is frozen and cannot be trusted —
 			// render it as unknown rather than repeating a possibly dead pod's
-			// last words (ADR-002).
+			// last words (ADR-0002).
 			Stale: onKnownNode && !ready,
 		})
 	}
@@ -137,7 +129,7 @@ func buildSnapshot(ctx context.Context, client kubernetes.Interface, kubeContext
 		}
 		return snap.Pods[i].Name < snap.Pods[j].Name
 	})
-	return snap, nil
+	return snap
 }
 
 func nodeRoles(n *corev1.Node) []string {

@@ -15,7 +15,7 @@ by a PR that "just adds it while we're in there."
 - Detail panels: pod restarts, ready ratio, images, owner, age; node version,
   IP, allocatable, pressures (done)
 - client-go **informers** replacing per-request Lists — zero steady-state API
-  server load (the remaining V1 build milestone)
+  server load (done — ADR-0003)
 - `kubectl-` plugin binary naming, goreleaser multi-OS release binaries
 - Edge cases: empty cluster, RBAC-denied startup, unreachable cluster banner
 - README with screenshot, `docs/rbac.yaml` sample

@@ -43,12 +43,16 @@ This rule exists because of a real incident, not a thought experiment — see
 
 ## How it works
 
-A single Go binary: client-go reads nodes and pods through your kubeconfig,
-normalizes them into a topology snapshot, and serves it at `/api/topology`
-alongside a static UI (vis-network, vendored and compiled into the binary via
-`go:embed` — no CDN, no build step, no runtime dependencies). Architecture
+A single Go binary: client-go **informers** maintain a watch-based in-memory
+mirror of your cluster's nodes and pods — after the initial sync, kutopo sends
+the API server **zero requests** while the cluster is idle, and changes land
+in the cache within milliseconds. `/api/topology` serves normalized snapshots
+from that mirror in microseconds, alongside a static UI (vis-network, vendored
+and compiled into the binary via `go:embed` — no CDN, no build step, no runtime
+dependencies). If the watch stream degrades, the payload and UI say so
+(`staleSince`) rather than presenting old data as current. Architecture
 rationale, including the options that lost, lives in
-[ADR-0001](docs/adr/ADR-0001-go-kubectl-plugin-with-local-browser-ui.md).
+[docs/adr/](docs/adr/).
 
 ## Positioning
 
@@ -61,8 +65,8 @@ rationale, including the options that lost, lives in
 
 ## Roadmap
 
-- **V1:** client-go informers replace per-request Lists (zero steady-state API
-  server load), `kubectl-` plugin naming, multi-OS release binaries, kind e2e.
+- **V1:** `kubectl-` plugin naming, multi-OS release binaries, kind e2e,
+  `docs/rbac.yaml` sample.
 - **Post-V1:** krew distribution.
 - **V2 (explicitly out of V1 scope):** SSE live push, namespace filtering,
   multi-cluster, in-cluster deployment mode with a real auth story.

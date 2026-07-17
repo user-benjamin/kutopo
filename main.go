@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -44,9 +46,24 @@ func main() {
 		}
 	}
 
+	ctx := context.Background()
+	store, err := NewStore(ctx, clientset)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "starting informers: %v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("kutopo: syncing cluster state from context %q ...", contextName)
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := store.WaitForSync(syncCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "kutopo: %v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("kutopo: cache synced — steady-state API traffic is now watch-only")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/topology", func(w http.ResponseWriter, r *http.Request) {
-		snap, err := buildSnapshot(r.Context(), clientset, contextName)
+		snap, err := store.Snapshot(contextName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return

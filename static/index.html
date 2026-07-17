@@ -193,6 +193,7 @@ let lastSnap = null;
 let view = { mode: "cluster", node: null }; // or { mode: "node", node: "<name>" }
 let viewChanged = true;
 let errorLogged = false;
+let staleLogged = false;
 
 /* ---------- deterministic layout ---------- */
 
@@ -523,7 +524,16 @@ async function poll() {
       lastSnap = snap;
     }
     lastFetched = new Date(snap.fetchedAt);
-    document.getElementById("banner").style.display = "none";
+    const banner = document.getElementById("banner");
+    if (snap.staleSince) {
+      banner.textContent = "watch stream degraded — map may be stale since " +
+        new Date(snap.staleSince).toLocaleTimeString() + " (recovering automatically)";
+      banner.style.display = "block";
+      if (!staleLogged) { logEvent("Failed", "watch stream degraded — cache may be stale"); staleLogged = true; }
+    } else {
+      banner.style.display = "none";
+      if (staleLogged) { logEvent("Running", "watch stream recovered"); staleLogged = false; }
+    }
     errorLogged = false;
   } catch (err) {
     const banner = document.getElementById("banner");
