@@ -10,7 +10,7 @@ running on which node, and can I trust what I'm seeing?"*
 > **Status: early development.** Pre-v0.1 — the walking skeleton works end-to-end
 > against a live cluster, but expect sharp edges. Not yet distributed via krew.
 
-<!-- TODO: screenshot of the topology view against a multi-node cluster -->
+![kutopo console view: a three-node kind cluster with its pods laid out in fixed grids, tree inventory on the left, status legend across the top](docs/screenshot.png)
 
 ## Quickstart
 
